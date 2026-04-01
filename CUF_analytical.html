@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Capillary Underfill (CUF) 流動預測</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 1400px; margin: auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #2c3e50; }
+        .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; background: #ecf0f1; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .control-group { display: flex; flex-direction: column; }
+        label { font-weight: bold; margin-bottom: 5px; color: #34495e; }
+        input[type=range] { width: 100%; cursor: pointer; }
+        .value-display { text-align: right; color: #e74c3c; font-weight: bold; }
+        .kpi-box { text-align: center; background: #3498db; color: white; padding: 15px; border-radius: 8px; font-size: 1.2em; font-weight: bold; margin-bottom: 20px; }
+        
+        /* 關鍵修改：使用 Grid 強制左右並列 */
+        .charts { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; /* 左右各佔 1 份比例 (50% / 50%) */
+            gap: 20px; 
+            width: 100%;
+        }
+        .chart-container { 
+            background: #fff; 
+            padding: 15px; 
+            border: 1px solid #ddd; 
+            border-radius: 8px; 
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        /* 若螢幕寬度小於 800px (如手機)，自動改為上下排列以防圖表擠壓變形 */
+        @media (max-width: 800px) {
+            .charts { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>CUF 狹縫流動分析儀表板</h1>
+    
+    <div class="controls">
+        <div class="control-group">
+            <label>黏度 (Viscosity): <span id="val-mu" class="value-display">0.5</span> Pa.s</label>
+            <input type="range" id="mu" min="0.02" max="2" step="0.01" value="0.5">
+        </div>
+        <div class="control-group">
+            <label>表面張力 (Surface Tension): <span id="val-gamma" class="value-display">0.03</span> N/m</label>
+            <input type="range" id="gamma" min="0.02" max="0.04" step="0.001" value="0.03">
+        </div>
+        <div class="control-group">
+            <label>接觸角 (Contact Angle): <span id="val-theta" class="value-display">30</span> 度</label>
+            <input type="range" id="theta" min="15" max="60" step="1" value="30">
+        </div>
+        <div class="control-group">
+            <label>狹縫高度 (Gap Height): <span id="val-h" class="value-display">50</span> um</label>
+            <input type="range" id="h" min="5" max="100" step="1" value="50">
+        </div>
+    </div>
+
+    <div class="kpi-box" id="kpi-time">流動至 1 公分所需時間: 計算中...</div>
+
+    <div class="charts">
+        <div class="chart-container"><canvas id="timeChart"></canvas></div>
+        <div class="chart-container"><canvas id="velChart"></canvas></div>
+    </div>
+</div>
+
+<script>
+    // 初始化圖表
+    const ctxTime = document.getElementById('timeChart').getContext('2d');
+    const ctxVel = document.getElementById('velChart').getContext('2d');
+    
+    let timeChart = new Chart(ctxTime, { type: 'line', data: { datasets: [{ label: '流動距離 (cm)', borderColor: '#e74c3c', backgroundColor: 'rgba(231, 76, 60, 0.1)', fill: true, tension: 0.4 }] }, options: { responsive: true, scales: { x: { type: 'linear', title: { display: true, text: '時間 (秒)' } }, y: { title: { display: true, text: '距離 (cm)' }, min: 0, max: 1 } }, plugins: { title: { display: true, text: '距離 vs. 時間', font: {size: 16} } } } });
+    
+    let velChart = new Chart(ctxVel, { type: 'line', data: { datasets: [{ label: '流速 (mm/s)', borderColor: '#2980b9', backgroundColor: 'rgba(41, 128, 185, 0.1)', fill: true, tension: 0.4 }] }, options: { responsive: true, scales: { x: { type: 'linear', title: { display: true, text: '距離 (cm)' }, min: 0, max: 1 }, y: { title: { display: true, text: '速度 (mm/s)' }, min: 0 } }, plugins: { title: { display: true, text: '速度 vs. 距離 (Washburn 衰減)', font: {size: 16} } } } });
+
+    function updateCharts() {
+        // 讀取輸入值
+        const mu = parseFloat(document.getElementById('mu').value);
+        const gamma = parseFloat(document.getElementById('gamma').value);
+        const theta_deg = parseFloat(document.getElementById('theta').value);
+        const h_um = parseFloat(document.getElementById('h').value);
+
+        // 更新 UI 數字
+        document.getElementById('val-mu').innerText = mu.toFixed(2);
+        document.getElementById('val-gamma').innerText = gamma.toFixed(3);
+        document.getElementById('val-theta').innerText = theta_deg;
+        document.getElementById('val-h').innerText = h_um;
+
+        // 單位轉換
+        const theta_rad = theta_deg * Math.PI / 180;
+        const h_m = h_um * 1e-6;
+        const L_target_m = 0.01; // 1 cm
+
+        // Washburn 常數 k (L^2 = k*t)
+        const k = (gamma * h_m * Math.cos(theta_rad)) / (3 * mu);
+        
+        // 計算總時間
+        const t_total = (L_target_m * L_target_m) / k;
+        document.getElementById('kpi-time').innerText = `流動至 1 公分所需時間: ${t_total.toFixed(2)} 秒`;
+
+        // 生成 距離 vs 時間 數據
+        let timeData = [];
+        for (let i = 0; i <= 50; i++) {
+            let t = (t_total / 50) * i;
+            let L_cm = Math.sqrt(k * t) * 100;
+            timeData.push({ x: t, y: L_cm });
+        }
+
+        // 生成 速度 vs 距離 數據 (避開 L=0 無限大)
+        let velData = [];
+        for (let i = 1; i <= 50; i++) {
+            let L_cm = (1 / 50) * i;
+            let L_m = L_cm / 100;
+            let v_m_s = (gamma * h_m * Math.cos(theta_rad)) / (6 * mu * L_m);
+            velData.push({ x: L_cm, y: v_m_s * 1000 }); // 轉成 mm/s
+        }
+
+        // 更新圖表
+        timeChart.data.datasets[0].data = timeData;
+        timeChart.update();
+        velChart.data.datasets[0].data = velData;
+        velChart.update();
+    }
+
+    // 綁定事件
+    ['mu', 'gamma', 'theta', 'h'].forEach(id => {
+        document.getElementById(id).addEventListener('input', updateCharts);
+    });
+
+    // 初始繪製
+    updateCharts();
+</script>
+</body>
+</html>
